@@ -2,7 +2,9 @@ import { useState } from "react";
 import { AppShell } from "./layout/AppShell";
 import { Card } from "./ui/Card";
 import { Button } from "./ui/Button";
+
 import Customers from "./pages/Customers";
+import Quotes from "./pages/Quotes";
 
 type Page = "dashboard" | "customers" | "quotes" | "orders";
 
@@ -14,9 +16,7 @@ export default function App() {
       case "dashboard":
         return (
           <Card>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Dashboard
-            </h1>
+            <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
             <p className="mt-2 text-zinc-600">
               Übersicht über Angebote und Aufträge.
             </p>
@@ -30,23 +30,12 @@ export default function App() {
         return <Customers />;
 
       case "quotes":
-        return (
-          <Card>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Angebote
-            </h1>
-            <p className="mt-2 text-zinc-600">
-              Hier entsteht später der Nutzenrechner.
-            </p>
-          </Card>
-        );
+        return <Quotes />;
 
       case "orders":
         return (
           <Card>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Aufträge
-            </h1>
+            <h1 className="text-2xl font-semibold tracking-tight">Aufträge</h1>
             <p className="mt-2 text-zinc-600">
               Produktions- und Statusverwaltung.
             </p>
@@ -71,12 +60,8 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-2xl bg-indigo-600" />
             <div>
-              <div className="text-sm font-semibold leading-4">
-                Digitaldruck
-              </div>
-              <div className="text-xs text-zinc-500">
-                Local Workspace
-              </div>
+              <div className="text-sm font-semibold leading-4">Digitaldruck</div>
+              <div className="text-xs text-zinc-500">Local Workspace</div>
             </div>
           </div>
 
