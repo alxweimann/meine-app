@@ -55,6 +55,10 @@ export default function Customers() {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
+
+  const [query, setQuery] = useState("");
+
   const [form, setForm] = useState({
     name: "",
     contact: "",
@@ -66,8 +70,102 @@ export default function Customers() {
     status: "Aktiv" as Customer["status"],
   });
 
-  function createCustomer() {
+  const filteredCustomers = customers.filter((c) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+
+    const haystack = [
+      c.id,
+      c.name,
+      c.contact,
+      c.email,
+      c.phone,
+      c.street,
+      c.postalCode,
+      c.city,
+      c.status,
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return haystack.includes(q);
+  });
+
+  function resetForm() {
+    setForm({
+      name: "",
+      contact: "",
+      email: "",
+      phone: "",
+      street: "",
+      postalCode: "",
+      city: "",
+      status: "Aktiv",
+    });
+  }
+
+  function openCreate() {
+    setIsEditMode(false);
+    resetForm();
+    setIsModalOpen(true);
+  }
+
+  function openEdit(customer: Customer) {
+    setIsEditMode(true);
+    setForm({
+      name: customer.name,
+      contact: customer.contact,
+      email: customer.email,
+      phone: customer.phone,
+      street: customer.street,
+      postalCode: customer.postalCode,
+      city: customer.city,
+      status: customer.status,
+    });
+    setIsModalOpen(true);
+  }
+
+  function closeModal() {
+    setIsModalOpen(false);
+    setIsEditMode(false);
+  }
+
+  function saveCustomer() {
     if (!form.name.trim()) return;
+
+    if (isEditMode && selectedCustomer) {
+      const updatedCustomers = customers.map((c) =>
+        c.id === selectedCustomer.id
+          ? {
+              ...c,
+              name: form.name.trim(),
+              contact: form.contact.trim() || "-",
+              email: form.email.trim() || "-",
+              phone: form.phone.trim() || "-",
+              street: form.street.trim() || "-",
+              postalCode: form.postalCode.trim() || "-",
+              city: form.city.trim() || "-",
+              status: form.status,
+            }
+          : c
+      );
+
+      setCustomers(updatedCustomers);
+      setSelectedCustomer({
+        ...selectedCustomer,
+        name: form.name.trim(),
+        contact: form.contact.trim() || "-",
+        email: form.email.trim() || "-",
+        phone: form.phone.trim() || "-",
+        street: form.street.trim() || "-",
+        postalCode: form.postalCode.trim() || "-",
+        city: form.city.trim() || "-",
+        status: form.status,
+      });
+
+      closeModal();
+      return;
+    }
 
     const nextId = "C-" + String(customers.length + 1).padStart(3, "0");
 
@@ -86,18 +184,20 @@ export default function Customers() {
     setCustomers([newCustomer, ...customers]);
     setSelectedCustomer(newCustomer);
 
-    setForm({
-      name: "",
-      contact: "",
-      email: "",
-      phone: "",
-      street: "",
-      postalCode: "",
-      city: "",
-      status: "Aktiv",
-    });
+    resetForm();
+    closeModal();
+  }
 
-    setIsModalOpen(false);
+  function deleteSelectedCustomer() {
+    if (!selectedCustomer) return;
+
+    const ok = window.confirm(
+      `Kunde wirklich löschen?\n\n${selectedCustomer.id} – ${selectedCustomer.name}`
+    );
+    if (!ok) return;
+
+    setCustomers(customers.filter((c) => c.id !== selectedCustomer.id));
+    setSelectedCustomer(null);
   }
 
   return (
@@ -109,7 +209,20 @@ export default function Customers() {
           <div className="text-lg font-semibold">Kundenübersicht</div>
         </div>
 
-        <Button onClick={() => setIsModalOpen(true)}>Neuer Kunde</Button>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400">
+              🔎
+            </span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Kunden suchen…"
+              className="h-10 w-64 rounded-2xl border border-zinc-200 bg-white pl-9 pr-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+            />
+          </div>
+          <Button onClick={openCreate}>Neuer Kunde</Button>
+        </div>
       </Card>
 
       {/* Table */}
@@ -127,7 +240,7 @@ export default function Customers() {
             </thead>
 
             <tbody>
-              {customers.map((c) => {
+              {filteredCustomers.map((c) => {
                 const isActive = selectedCustomer?.id === c.id;
 
                 return (
@@ -158,6 +271,14 @@ export default function Customers() {
                   </tr>
                 );
               })}
+
+              {filteredCustomers.length === 0 && (
+                <tr>
+                  <td className="px-4 py-8 text-center text-zinc-500" colSpan={5}>
+                    Keine Kunden gefunden.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -172,9 +293,17 @@ export default function Customers() {
               <div className="text-lg font-semibold">{selectedCustomer.name}</div>
             </div>
 
-            <Button variant="secondary" onClick={() => setSelectedCustomer(null)}>
-              Schließen
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={() => setSelectedCustomer(null)}>
+                Schließen
+              </Button>
+
+              <Button variant="secondary" onClick={deleteSelectedCustomer}>
+                Löschen
+              </Button>
+
+              <Button onClick={() => openEdit(selectedCustomer)}>Bearbeiten</Button>
+            </div>
           </div>
 
           <div className="mt-4 grid gap-2 text-sm text-zinc-700">
@@ -211,19 +340,18 @@ export default function Customers() {
       {/* Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/30"
-            onClick={() => setIsModalOpen(false)}
-          />
+          <div className="absolute inset-0 bg-black/30" onClick={closeModal} />
 
           <div className="relative w-full max-w-lg">
             <Card className="p-6">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="text-xs text-zinc-500">Kunden</div>
-                  <div className="text-lg font-semibold">Neuer Kunde</div>
+                  <div className="text-lg font-semibold">
+                    {isEditMode ? "Kunde bearbeiten" : "Neuer Kunde"}
+                  </div>
                 </div>
-                <Button variant="secondary" onClick={() => setIsModalOpen(false)}>
+                <Button variant="secondary" onClick={closeModal}>
                   Schließen
                 </Button>
               </div>
@@ -323,11 +451,10 @@ export default function Customers() {
                 </label>
 
                 <div className="mt-2 flex items-center justify-end gap-2">
-                  <Button variant="secondary" onClick={() => setIsModalOpen(false)}>
+                  <Button variant="secondary" onClick={closeModal}>
                     Abbrechen
                   </Button>
-
-                  <Button onClick={createCustomer}>Speichern</Button>
+                  <Button onClick={saveCustomer}>Speichern</Button>
                 </div>
               </div>
             </Card>
