@@ -10,6 +10,7 @@ type QuoteStatus = "Entwurf" | "Gesendet" | "Angenommen" | "Abgelehnt";
 
 type PaperGrain = "SB" | "BB"; // Schmalbahn / Breitbahn
 type ProductOrientation = "Hochformat" | "Querformat";
+
 type FormatPreset = "SRA3" | "A3" | "A4" | "A5" | "A6" | "Individuell";
 
 const FORMAT_PRESETS: Array<{
@@ -26,6 +27,18 @@ const FORMAT_PRESETS: Array<{
   { key: "Individuell", label: "Individuell …", w: 0, h: 0 },
 ];
 
+type SheetPreset = "SRA3" | "Individuell";
+
+const SHEET_PRESETS: Array<{
+  key: SheetPreset;
+  label: string;
+  w: number;
+  h: number;
+}> = [
+  { key: "SRA3", label: "SRA3 Bogen (320×450 mm)", w: 320, h: 450 },
+  { key: "Individuell", label: "Individuell …", w: 0, h: 0 },
+];
+
 const COLOR_OPTIONS = [
   "1/0 (S/W)",
   "1/1 (S/W beidseitig)",
@@ -39,17 +52,52 @@ const COLOR_OPTIONS = [
 
 type ColorOption = (typeof COLOR_OPTIONS)[number];
 
+type NestingLayout = {
+  sheetW: number;
+  sheetH: number;
+
+  productW: number; // inkl. Beschnitt (final gerechnet)
+  productH: number;
+
+  margin: number;
+  gap: number;
+
+  gridX: number;
+  gridY: number;
+  nUp: number;
+
+  rotated: boolean; // Produkt 90° gedreht im Nutzen
+  usedW: number;
+  usedH: number;
+
+  wasteArea: number; // mm^2
+};
+
 type QuotePosition = {
   id: string;
   productName: string;
 
+  // Produktformat
   formatPreset: FormatPreset;
   customWidthMm?: number;
   customHeightMm?: number;
 
+  // Laufrichtung
   paperGrain: PaperGrain;
   productOrientation: ProductOrientation;
 
+  // Nutzen-Setup
+  sheetPreset: SheetPreset;
+  sheetCustomWmm?: number;
+  sheetCustomHmm?: number;
+  bleedMm: number; // Beschnitt pro Seite
+  marginMm: number; // Nicht druckbarer Bereich (ehem. Rand)
+  gapMm: number; // Zwischenschnitt (ehem. Abstand)
+
+  // Ergebnis (für spätere grafische Darstellung)
+  nesting?: NestingLayout;
+
+  // Rest
   quantity: number;
   paper: string;
   colors: ColorOption;
@@ -125,16 +173,7 @@ function quoteNet(q: Quote) {
   return q.positions.length > 0 ? positionsTotal(q.positions) : q.totalNet;
 }
 
-function formatDims(p: QuotePosition) {
-  const preset = FORMAT_PRESETS.find((x) => x.key === p.formatPreset);
-  if (p.formatPreset !== "Individuell" && preset) return `${preset.w}×${preset.h} mm`;
-  const w = p.customWidthMm ?? 0;
-  const h = p.customHeightMm ?? 0;
-  return w && h ? `${w}×${h} mm` : "—";
-}
-
 function parseNumberDe(value: string) {
-  // akzeptiert "1.234,56" oder "1234,56" oder "1234.56"
   const v = String(value).trim();
   if (!v) return 0;
   const normalized = v.replace(/\./g, "").replace(",", ".");
@@ -165,15 +204,331 @@ function StatusBadge({ status }: { status: QuoteStatus }) {
   );
 }
 
+function formatDimsFromPreset(preset: FormatPreset, customW?: number, customH?: number) {
+  const hit = FORMAT_PRESETS.find((x) => x.key === preset);
+  if (preset !== "Individuell" && hit) return { w: hit.w, h: hit.h, text: `${hit.w}×${hit.h} mm` };
+
+  const w = customW ?? 0;
+  const h = customH ?? 0;
+  const text = w > 0 && h > 0 ? `${w}×${h} mm` : "—";
+  return { w, h, text };
+}
+
+function sheetDimsFromPreset(preset: SheetPreset, customW?: number, customH?: number) {
+  const hit = SHEET_PRESETS.find((x) => x.key === preset);
+  if (preset !== "Individuell" && hit) return { w: hit.w, h: hit.h, text: `${hit.w}×${hit.h} mm` };
+
+  const w = customW ?? 0;
+  const h = customH ?? 0;
+  const text = w > 0 && h > 0 ? `${w}×${h} mm` : "—";
+  return { w, h, text };
+}
+
+function safeFloor(n: number) {
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+function computeNesting(params: {
+  sheetW: number;
+  sheetH: number;
+  productTrimW: number;
+  productTrimH: number;
+  bleed: number;
+  margin: number;
+  gap: number;
+}): NestingLayout | null {
+  const sheetW = params.sheetW;
+  const sheetH = params.sheetH;
+
+  const bleed = Math.max(0, params.bleed);
+  const margin = Math.max(0, params.margin);
+  const gap = Math.max(0, params.gap);
+
+  const productW = params.productTrimW + 2 * bleed;
+  const productH = params.productTrimH + 2 * bleed;
+
+  if (!(sheetW > 0 && sheetH > 0 && productW > 0 && productH > 0)) return null;
+
+  const availW = sheetW - 2 * margin;
+  const availH = sheetH - 2 * margin;
+  if (availW <= 0 || availH <= 0) return null;
+
+  function candidate(w: number, h: number, rotated: boolean): NestingLayout {
+    const gridX = safeFloor((availW + gap) / (w + gap));
+    const gridY = safeFloor((availH + gap) / (h + gap));
+    const nUp = gridX * gridY;
+
+    const usedW = gridX > 0 ? gridX * w + (gridX - 1) * gap : 0;
+    const usedH = gridY > 0 ? gridY * h + (gridY - 1) * gap : 0;
+
+    const wasteArea = Math.max(0, availW * availH - usedW * usedH);
+
+    return {
+      sheetW,
+      sheetH,
+      productW: w,
+      productH: h,
+      margin,
+      gap,
+      gridX,
+      gridY,
+      nUp,
+      rotated,
+      usedW,
+      usedH,
+      wasteArea,
+    };
+  }
+
+  const c1 = candidate(productW, productH, false);
+  const c2 = candidate(productH, productW, true);
+
+  const best =
+    c2.nUp > c1.nUp
+      ? c2
+      : c2.nUp < c1.nUp
+      ? c1
+      : c2.wasteArea < c1.wasteArea
+      ? c2
+      : c1;
+
+  return best.nUp > 0 ? best : null;
+}
+
 /* ================================
-   COMPONENT
+   GRAPHIC PREVIEW (Option B)
 ================================ */
+
+function NestingPreview(props: { layout: NestingLayout }) {
+  const { layout } = props;
+
+  // Anzeige immer Querformat: wir "drehen" nur die Darstellung, nicht die Logik.
+  const landscape = layout.sheetW >= layout.sheetH;
+
+  // Display-Maße (nur Rendering)
+  const dispSheetW = landscape ? layout.sheetW : layout.sheetH;
+  const dispSheetH = landscape ? layout.sheetH : layout.sheetW;
+
+  // Margin / Gap
+  const margin = layout.margin;
+  const gap = layout.gap;
+
+  // Display-Produktmaße: wenn wir den Sheet gedreht anzeigen, müssen wir für die Darstellung umdenken
+  const dispProdW = landscape ? layout.productW : layout.productH;
+  const dispProdH = landscape ? layout.productH : layout.productW;
+
+  const dispGridX = landscape ? layout.gridX : layout.gridY;
+  const dispGridY = landscape ? layout.gridY : layout.gridX;
+
+  const vw = 720;
+  const vh = 320;
+  const pad = 14;
+
+  const scale = Math.min((vw - pad * 2) / dispSheetW, (vh - pad * 2) / dispSheetH);
+
+  const sheetW = dispSheetW * scale;
+  const sheetH = dispSheetH * scale;
+
+  const m = margin * scale;
+  const g = gap * scale;
+
+  const availW = (dispSheetW - 2 * margin) * scale;
+  const availH = (dispSheetH - 2 * margin) * scale;
+
+  const prodW = dispProdW * scale;
+  const prodH = dispProdH * scale;
+
+  const sx = pad;
+  const sy = pad;
+
+  // Zentrierung: Nutzenpaket innerhalb der Nutzfläche mittig ausrichten
+  const usedW = dispGridX > 0 ? dispGridX * prodW + (dispGridX - 1) * g : 0;
+  const usedH = dispGridY > 0 ? dispGridY * prodH + (dispGridY - 1) * g : 0;
+
+  const availX = sx + m;
+  const availY = sy + m;
+
+  const offsetX = Math.max(0, (availW - usedW) / 2);
+  const offsetY = Math.max(0, (availH - usedH) / 2);
+
+  const x0 = availX + offsetX;
+  const y0 = availY + offsetY;
+
+  // Nutzen-Rechtecke
+  const products: Array<{ x: number; y: number; w: number; h: number }> = [];
+  for (let yy = 0; yy < dispGridY; yy++) {
+    for (let xx = 0; xx < dispGridX; xx++) {
+      const px = x0 + xx * (prodW + g);
+      const py = y0 + yy * (prodH + g);
+      products.push({ x: px, y: py, w: prodW, h: prodH });
+    }
+  }
+
+  // Zwischenschnitt-Linien (rot, sehr dünn) - innerhalb des Nutzenpakets
+  const cutLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+
+  for (let i = 1; i < dispGridX; i++) {
+    const xLine = x0 + (i - 1) * (prodW + g) + prodW + g / 2;
+    cutLines.push({ x1: xLine, y1: y0, x2: xLine, y2: y0 + usedH });
+  }
+
+  for (let j = 1; j < dispGridY; j++) {
+    const yLine = y0 + (j - 1) * (prodH + g) + prodH + g / 2;
+    cutLines.push({ x1: x0, y1: yLine, x2: x0 + usedW, y2: yLine });
+  }
+
+  // Schnittmarken (dünn, dezent) – kleine "Ticks" an den Ecken der Nutzfläche
+  const markLen = 10;
+  const marks = [
+    { x1: availX, y1: availY, x2: availX + markLen, y2: availY },
+    { x1: availX, y1: availY, x2: availX, y2: availY + markLen },
+
+    { x1: availX + availW, y1: availY, x2: availX + availW - markLen, y2: availY },
+    { x1: availX + availW, y1: availY, x2: availX + availW, y2: availY + markLen },
+
+    { x1: availX, y1: availY + availH, x2: availX + markLen, y2: availY + availH },
+    { x1: availX, y1: availY + availH, x2: availX, y2: availY + availH - markLen },
+
+    { x1: availX + availW, y1: availY + availH, x2: availX + availW - markLen, y2: availY + availH },
+    { x1: availX + availW, y1: availY + availH, x2: availX + availW, y2: availY + availH - markLen },
+  ];
+
+  // Minimal-Radius
+  const rSheet = 3;
+  const rAvail = 2;
+  const rProd = 2;
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-4 py-2">
+        <div className="text-xs text-zinc-600">Vorschau (schematisch)</div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+            {layout.nUp} Nutzen/Bogen
+          </span>
+          <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-700">
+            {layout.gridX}×{layout.gridY}
+          </span>
+          {layout.rotated && (
+            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+              gedreht
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="p-3">
+        <svg viewBox={`0 0 ${vw} ${vh}`} width="100%" height="auto" className="block">
+          {/* Bogen */}
+          <rect
+            x={sx}
+            y={sy}
+            width={sheetW}
+            height={sheetH}
+            rx={rSheet}
+            fill="rgb(250 250 250)"
+            stroke="rgb(228 228 231)"
+            strokeWidth="2"
+          />
+
+          {/* Nicht druckbarer Bereich (rosa Zone) */}
+          <rect
+            x={sx}
+            y={sy}
+            width={sheetW}
+            height={sheetH}
+            rx={rSheet}
+            fill="rgb(253 232 248)"
+            opacity="0.9"
+          />
+
+          {/* Nutzfläche (innen) */}
+          <rect
+            x={availX}
+            y={availY}
+            width={availW}
+            height={availH}
+            rx={rAvail}
+            fill="white"
+            stroke="rgb(226 232 240)"
+            strokeWidth="1.2"
+          />
+
+          {/* Schnittmarken (dünn) */}
+          {marks.map((m, i) => (
+            <line
+              key={i}
+              x1={m.x1}
+              y1={m.y1}
+              x2={m.x2}
+              y2={m.y2}
+              stroke="rgb(100 116 139)"
+              strokeWidth="0.8"
+              opacity="0.55"
+              shapeRendering="crispEdges"
+            />
+          ))}
+
+          {/* Zwischenschnitt-Linien (rot, sehr dünn) */}
+          {cutLines.map((l, i) => (
+            <line
+              key={i}
+              x1={l.x1}
+              y1={l.y1}
+              x2={l.x2}
+              y2={l.y2}
+              stroke="rgb(239 68 68)"
+              strokeWidth="0.7"
+              opacity="0.75"
+              shapeRendering="crispEdges"
+            />
+          ))}
+
+          {/* Nutzen (babyblau) */}
+          {products.map((p, i) => (
+            <rect
+              key={i}
+              x={p.x}
+              y={p.y}
+              width={p.w}
+              height={p.h}
+              rx={rProd}
+              fill="rgb(219 234 254)"
+              stroke="rgb(147 197 253)"
+              strokeWidth="1"
+            />
+          ))}
+        </svg>
+
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+          <span className="inline-flex items-center gap-2">
+            <span className="h-3 w-3 border border-zinc-300 bg-white" />
+            Nutzfläche
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span className="h-3 w-3 bg-pink-100" />
+            Nicht druckbar
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span className="h-3 w-3 border border-blue-300 bg-blue-100" />
+            Nutzen
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span className="h-[2px] w-6 bg-red-500" />
+            Zwischenschnitt
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function Quotes() {
   const [quotes, setQuotes] = useState<Quote[]>(demoQuotes);
   const [selected, setSelected] = useState<Quote | null>(null);
   const [view, setView] = useState<"list" | "detail">("list");
-
   const [query, setQuery] = useState("");
 
   // Quote Create Modal
@@ -199,6 +554,7 @@ export default function Quotes() {
   const [isPosModalOpen, setIsPosModalOpen] = useState(false);
   const [posTouched, setPosTouched] = useState(false);
   const [editingPosId, setEditingPosId] = useState<string | null>(null);
+
   const [posForm, setPosForm] = useState({
     productName: "",
     formatPreset: "SRA3" as FormatPreset,
@@ -206,6 +562,14 @@ export default function Quotes() {
     customHeightMm: "",
     paperGrain: "SB" as PaperGrain,
     productOrientation: "Hochformat" as ProductOrientation,
+
+    sheetPreset: "SRA3" as SheetPreset,
+    sheetCustomWmm: "",
+    sheetCustomHmm: "",
+    bleedMm: "3",
+    marginMm: "5",
+    gapMm: "3",
+
     quantity: "1000",
     paper: "135g Bilderdruck matt",
     colors: "4/4 (CMYK beidseitig)" as ColorOption,
@@ -217,14 +581,7 @@ export default function Quotes() {
     if (!q) return quotes;
 
     return quotes.filter((x) => {
-      const hay = [
-        x.id,
-        x.title,
-        x.customerName,
-        x.status,
-        x.createdAt,
-        String(quoteNet(x)),
-      ]
+      const hay = [x.id, x.title, x.customerName, x.status, x.createdAt, String(quoteNet(x))]
         .join(" ")
         .toLowerCase();
       return hay.includes(q);
@@ -262,7 +619,7 @@ export default function Quotes() {
       title: quoteCreateForm.title.trim(),
       customerName: quoteCreateForm.customerName,
       createdAt: new Date().toISOString().slice(0, 10),
-      totalNet: totalNet,
+      totalNet,
       status: quoteCreateForm.status,
       positions: [],
     };
@@ -329,6 +686,14 @@ export default function Quotes() {
       customHeightMm: "",
       paperGrain: "SB",
       productOrientation: "Hochformat",
+
+      sheetPreset: "SRA3",
+      sheetCustomWmm: "",
+      sheetCustomHmm: "",
+      bleedMm: "3",
+      marginMm: "5",
+      gapMm: "3",
+
       quantity: "1000",
       paper: "135g Bilderdruck matt",
       colors: "4/4 (CMYK beidseitig)",
@@ -348,13 +713,24 @@ export default function Quotes() {
     if (!selected) return;
     setEditingPosId(p.id);
 
+    const dims = formatDimsFromPreset(p.formatPreset, p.customWidthMm, p.customHeightMm);
+    const sheetDims = sheetDimsFromPreset(p.sheetPreset, p.sheetCustomWmm, p.sheetCustomHmm);
+
     setPosForm({
       productName: p.productName,
       formatPreset: p.formatPreset,
-      customWidthMm: String(p.customWidthMm ?? ""),
-      customHeightMm: String(p.customHeightMm ?? ""),
+      customWidthMm: p.formatPreset === "Individuell" ? String(dims.w || "") : "",
+      customHeightMm: p.formatPreset === "Individuell" ? String(dims.h || "") : "",
       paperGrain: p.paperGrain,
       productOrientation: p.productOrientation,
+
+      sheetPreset: p.sheetPreset,
+      sheetCustomWmm: p.sheetPreset === "Individuell" ? String(sheetDims.w || "") : "",
+      sheetCustomHmm: p.sheetPreset === "Individuell" ? String(sheetDims.h || "") : "",
+      bleedMm: String(p.bleedMm),
+      marginMm: String(p.marginMm),
+      gapMm: String(p.gapMm),
+
       quantity: String(p.quantity),
       paper: p.paper,
       colors: p.colors,
@@ -367,13 +743,60 @@ export default function Quotes() {
 
   function canSavePosition() {
     if (posForm.productName.trim().length === 0) return false;
-    if (posForm.formatPreset === "Individuell") {
-      const w = parseNumberDe(posForm.customWidthMm);
-      const h = parseNumberDe(posForm.customHeightMm);
-      if (!(w > 0 && h > 0)) return false;
+
+    const prod =
+      posForm.formatPreset === "Individuell"
+        ? { w: parseNumberDe(posForm.customWidthMm), h: parseNumberDe(posForm.customHeightMm) }
+        : formatDimsFromPreset(posForm.formatPreset);
+
+    if (!(prod.w > 0 && prod.h > 0)) return false;
+
+    if (posForm.sheetPreset === "Individuell") {
+      const sw = parseNumberDe(posForm.sheetCustomWmm);
+      const sh = parseNumberDe(posForm.sheetCustomHmm);
+      if (!(sw > 0 && sh > 0)) return false;
     }
+
     return true;
   }
+
+  const liveNesting = useMemo(() => {
+    const prod =
+      posForm.formatPreset === "Individuell"
+        ? { w: parseNumberDe(posForm.customWidthMm), h: parseNumberDe(posForm.customHeightMm) }
+        : formatDimsFromPreset(posForm.formatPreset);
+
+    const sheet =
+      posForm.sheetPreset === "Individuell"
+        ? { w: parseNumberDe(posForm.sheetCustomWmm), h: parseNumberDe(posForm.sheetCustomHmm) }
+        : sheetDimsFromPreset(posForm.sheetPreset);
+
+    const bleed = parseNumberDe(posForm.bleedMm);
+    const margin = parseNumberDe(posForm.marginMm);
+    const gap = parseNumberDe(posForm.gapMm);
+
+    if (!(prod.w > 0 && prod.h > 0 && sheet.w > 0 && sheet.h > 0)) return null;
+
+    return computeNesting({
+      sheetW: sheet.w,
+      sheetH: sheet.h,
+      productTrimW: prod.w,
+      productTrimH: prod.h,
+      bleed,
+      margin,
+      gap,
+    });
+  }, [
+    posForm.formatPreset,
+    posForm.customWidthMm,
+    posForm.customHeightMm,
+    posForm.sheetPreset,
+    posForm.sheetCustomWmm,
+    posForm.sheetCustomHmm,
+    posForm.bleedMm,
+    posForm.marginMm,
+    posForm.gapMm,
+  ]);
 
   function upsertPosition() {
     setPosTouched(true);
@@ -383,21 +806,49 @@ export default function Quotes() {
     const qty = parseIntDe(posForm.quantity);
     const unit = parseNumberDe(posForm.unitPrice);
 
-    let customWidth: number | undefined = undefined;
-    let customHeight: number | undefined = undefined;
+    const prodDims =
+      posForm.formatPreset === "Individuell"
+        ? { w: parseNumberDe(posForm.customWidthMm), h: parseNumberDe(posForm.customHeightMm), text: "" }
+        : formatDimsFromPreset(posForm.formatPreset);
 
-    if (posForm.formatPreset === "Individuell") {
-      customWidth = parseNumberDe(posForm.customWidthMm);
-      customHeight = parseNumberDe(posForm.customHeightMm);
-    }
+    const sheetDims =
+      posForm.sheetPreset === "Individuell"
+        ? { w: parseNumberDe(posForm.sheetCustomWmm), h: parseNumberDe(posForm.sheetCustomHmm), text: "" }
+        : sheetDimsFromPreset(posForm.sheetPreset);
+
+    const bleedMm = Math.max(0, parseNumberDe(posForm.bleedMm));
+    const marginMm = Math.max(0, parseNumberDe(posForm.marginMm));
+    const gapMm = Math.max(0, parseNumberDe(posForm.gapMm));
+
+    const nesting = computeNesting({
+      sheetW: sheetDims.w,
+      sheetH: sheetDims.h,
+      productTrimW: prodDims.w,
+      productTrimH: prodDims.h,
+      bleed: bleedMm,
+      margin: marginMm,
+      gap: gapMm,
+    });
 
     const normalized: Omit<QuotePosition, "id"> = {
       productName: posForm.productName.trim(),
+
       formatPreset: posForm.formatPreset,
-      customWidthMm: customWidth,
-      customHeightMm: customHeight,
+      customWidthMm: posForm.formatPreset === "Individuell" ? prodDims.w : undefined,
+      customHeightMm: posForm.formatPreset === "Individuell" ? prodDims.h : undefined,
+
       paperGrain: posForm.paperGrain,
       productOrientation: posForm.productOrientation,
+
+      sheetPreset: posForm.sheetPreset,
+      sheetCustomWmm: posForm.sheetPreset === "Individuell" ? sheetDims.w : undefined,
+      sheetCustomHmm: posForm.sheetPreset === "Individuell" ? sheetDims.h : undefined,
+      bleedMm,
+      marginMm,
+      gapMm,
+
+      nesting: nesting ?? undefined,
+
       quantity: qty,
       paper: posForm.paper.trim() || "-",
       colors: posForm.colors,
@@ -407,9 +858,7 @@ export default function Quotes() {
     let updatedPositions: QuotePosition[];
 
     if (editingPosId) {
-      updatedPositions = selected.positions.map((p) =>
-        p.id === editingPosId ? { ...p, ...normalized } : p
-      );
+      updatedPositions = selected.positions.map((p) => (p.id === editingPosId ? { ...p, ...normalized } : p));
     } else {
       const newPos: QuotePosition = { id: newId(), ...normalized };
       updatedPositions = [newPos, ...selected.positions];
@@ -418,7 +867,6 @@ export default function Quotes() {
     const updated: Quote = { ...selected, positions: updatedPositions };
     setSelected(updated);
     setQuotes((prev) => prev.map((q) => (q.id === selected.id ? updated : q)));
-
     setIsPosModalOpen(false);
     setEditingPosId(null);
   }
@@ -440,7 +888,7 @@ export default function Quotes() {
   }
 
   /* =======================
-     UI STATE / VALIDATION
+     VALIDATION
   ======================= */
 
   const posSum = selected ? positionsTotal(selected.positions) : 0;
@@ -454,6 +902,11 @@ export default function Quotes() {
     posTouched &&
     posForm.formatPreset === "Individuell" &&
     !(parseNumberDe(posForm.customWidthMm) > 0 && parseNumberDe(posForm.customHeightMm) > 0);
+
+  const sheetCustomSizeError =
+    posTouched &&
+    posForm.sheetPreset === "Individuell" &&
+    !(parseNumberDe(posForm.sheetCustomWmm) > 0 && parseNumberDe(posForm.sheetCustomHmm) > 0);
 
   return (
     <div className="grid gap-4">
@@ -606,6 +1059,7 @@ export default function Quotes() {
                       <th className="px-4 py-3 text-left font-medium">Pos</th>
                       <th className="px-4 py-3 text-left font-medium">Produkt</th>
                       <th className="px-4 py-3 text-left font-medium">Format</th>
+                      <th className="px-4 py-3 text-left font-medium">Nutzen</th>
                       <th className="px-4 py-3 text-left font-medium">Laufrichtung</th>
                       <th className="px-4 py-3 text-left font-medium">Papier</th>
                       <th className="px-4 py-3 text-left font-medium">Farben</th>
@@ -617,247 +1071,411 @@ export default function Quotes() {
                   </thead>
 
                   <tbody>
-                    {selected.positions.map((p, idx) => (
-                      <tr key={p.id} className="border-b border-zinc-100">
-                        <td className="px-4 py-3 font-medium text-zinc-900">
-                          {String(idx + 1).padStart(2, "0")}
-                        </td>
-                        <td className="px-4 py-3 text-zinc-900">{p.productName}</td>
-                        <td className="px-4 py-3 text-zinc-700">
-                          {p.formatPreset}
-                          <span className="text-zinc-400"> · </span>
-                          {formatDims(p)}
-                        </td>
-                        <td className="px-4 py-3 text-zinc-700">
-                          {p.paperGrain} / {p.productOrientation}
-                        </td>
-                        <td className="px-4 py-3 text-zinc-700">{p.paper}</td>
-                        <td className="px-4 py-3 text-zinc-700">{p.colors}</td>
-                        <td className="px-4 py-3 text-right text-zinc-900">
-                          {p.quantity.toLocaleString("de-DE")}
-                        </td>
-                        <td className="px-4 py-3 text-right text-zinc-900">{formatEUR(p.unitPrice)}</td>
-                        <td className="px-4 py-3 text-right font-medium text-zinc-900">
-                          {formatEUR(p.unitPrice * p.quantity)}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="inline-flex gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openEditPosition(p);
-                              }}
-                              className="rounded-xl px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100"
-                              title="Bearbeiten"
-                            >
-                              ✏️
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deletePosition(p.id);
-                              }}
-                              className="rounded-xl px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100"
-                              title="Löschen"
-                            >
-                              🗑
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {selected.positions.map((p, idx) => {
+                      const dims = formatDimsFromPreset(p.formatPreset, p.customWidthMm, p.customHeightMm);
+                      const n = p.nesting;
+                      return (
+                        <tr key={p.id} className="border-b border-zinc-100">
+                          <td className="px-4 py-3 font-medium text-zinc-900">
+                            {String(idx + 1).padStart(2, "0")}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-900">{p.productName}</td>
+                          <td className="px-4 py-3 text-zinc-700">
+                            {p.formatPreset}
+                            <span className="text-zinc-400"> · </span>
+                            {dims.text}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-700">
+                            {n ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="font-medium text-zinc-900">{n.nUp} Nutzen</span>
+                                <span className="text-zinc-500">
+                                  ({n.gridX}×{n.gridY}
+                                  {n.rotated ? " · gedreht" : ""})
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-zinc-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-700">
+                            {p.paperGrain} / {p.productOrientation}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-700">{p.paper}</td>
+                          <td className="px-4 py-3 text-zinc-700">{p.colors}</td>
+                          <td className="px-4 py-3 text-right text-zinc-900">
+                            {p.quantity.toLocaleString("de-DE")}
+                          </td>
+                          <td className="px-4 py-3 text-right text-zinc-900">{formatEUR(p.unitPrice)}</td>
+                          <td className="px-4 py-3 text-right font-medium text-zinc-900">
+                            {formatEUR(p.unitPrice * p.quantity)}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="inline-flex gap-1">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openEditPosition(p);
+                                }}
+                                className="rounded-xl px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100"
+                                title="Bearbeiten"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deletePosition(p.id);
+                                }}
+                                className="rounded-xl px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100"
+                                title="Löschen"
+                              >
+                                🗑
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
           </Card>
 
-          {/* ===== Position Modal ===== */}
+          {/* ===== Position Modal (scrollbar, max-w-5xl) ===== */}
           {isPosModalOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-              <div className="absolute inset-0 bg-black/30" onClick={() => setIsPosModalOpen(false)} />
-
-              <div className="relative w-full max-w-xl">
-                <Card className="p-6">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="text-xs text-zinc-500">Angebot</div>
-                      <div className="text-lg font-semibold">
-                        {editingPosId ? "Position bearbeiten" : "Position hinzufügen"}
+            <div className="fixed inset-0 z-50 overflow-y-auto">
+              <div className="min-h-full p-6 flex items-start justify-center">
+                <div className="absolute inset-0 bg-black/30" onClick={() => setIsPosModalOpen(false)} />
+                <div className="relative w-full max-w-5xl">
+                  <Card className="p-6">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-xs text-zinc-500">Angebot</div>
+                        <div className="text-lg font-semibold">
+                          {editingPosId ? "Position bearbeiten" : "Position hinzufügen"}
+                        </div>
                       </div>
+                      <Button variant="secondary" onClick={() => setIsPosModalOpen(false)}>
+                        Schließen
+                      </Button>
                     </div>
-                    <Button variant="secondary" onClick={() => setIsPosModalOpen(false)}>
-                      Schließen
-                    </Button>
-                  </div>
 
-                  <div className="mt-4 grid gap-3">
-                    <label className="grid gap-1">
-                      <span className="text-xs font-medium text-zinc-600">Produkt *</span>
-                      <input
-                        value={posForm.productName}
-                        onChange={(e) => setPosForm({ ...posForm, productName: e.target.value })}
-                        onBlur={() => setPosTouched(true)}
-                        className={[
-                          "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
-                          posProductError ? "border-rose-400" : "border-zinc-200",
-                        ].join(" ")}
-                        placeholder="z.B. Flyer A5"
-                      />
-                      {posProductError && (
-                        <span className="text-xs text-rose-600">Bitte Produktname eingeben.</span>
-                      )}
-                    </label>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="mt-4 grid gap-4">
+                      {/* Produkt */}
                       <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Format</span>
-                        <select
-                          value={posForm.formatPreset}
-                          onChange={(e) =>
-                            setPosForm({ ...posForm, formatPreset: e.target.value as FormatPreset })
-                          }
-                          className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                        >
-                          {FORMAT_PRESETS.map((f) => (
-                            <option key={f.key} value={f.key}>
-                              {f.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Auflage</span>
+                        <span className="text-xs font-medium text-zinc-600">Produkt *</span>
                         <input
-                          value={posForm.quantity}
-                          onChange={(e) => setPosForm({ ...posForm, quantity: e.target.value })}
-                          className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                          placeholder="z.B. 1000"
+                          value={posForm.productName}
+                          onChange={(e) => setPosForm({ ...posForm, productName: e.target.value })}
+                          onBlur={() => setPosTouched(true)}
+                          className={[
+                            "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
+                            posProductError ? "border-rose-400" : "border-zinc-200",
+                          ].join(" ")}
+                          placeholder="z.B. Flyer A5"
                         />
+                        {posProductError && (
+                          <span className="text-xs text-rose-600">Bitte Produktname eingeben.</span>
+                        )}
                       </label>
-                    </div>
 
-                    {posForm.formatPreset === "Individuell" && (
+                      {/* Format + Auflage */}
                       <div className="grid gap-3 sm:grid-cols-2">
                         <label className="grid gap-1">
-                          <span className="text-xs font-medium text-zinc-600">Breite (mm) *</span>
-                          <input
-                            value={posForm.customWidthMm}
-                            onChange={(e) => setPosForm({ ...posForm, customWidthMm: e.target.value })}
-                            onBlur={() => setPosTouched(true)}
-                            className={[
-                              "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
-                              posCustomSizeError ? "border-rose-400" : "border-zinc-200",
-                            ].join(" ")}
-                            placeholder="z.B. 210"
-                          />
+                          <span className="text-xs font-medium text-zinc-600">Produktformat</span>
+                          <select
+                            value={posForm.formatPreset}
+                            onChange={(e) =>
+                              setPosForm({ ...posForm, formatPreset: e.target.value as FormatPreset })
+                            }
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                          >
+                            {FORMAT_PRESETS.map((f) => (
+                              <option key={f.key} value={f.key}>
+                                {f.label}
+                              </option>
+                            ))}
+                          </select>
                         </label>
 
                         <label className="grid gap-1">
-                          <span className="text-xs font-medium text-zinc-600">Höhe (mm) *</span>
+                          <span className="text-xs font-medium text-zinc-600">Auflage</span>
                           <input
-                            value={posForm.customHeightMm}
-                            onChange={(e) => setPosForm({ ...posForm, customHeightMm: e.target.value })}
-                            onBlur={() => setPosTouched(true)}
-                            className={[
-                              "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
-                              posCustomSizeError ? "border-rose-400" : "border-zinc-200",
-                            ].join(" ")}
-                            placeholder="z.B. 297"
+                            value={posForm.quantity}
+                            onChange={(e) => setPosForm({ ...posForm, quantity: e.target.value })}
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                            placeholder="z.B. 1000"
                           />
                         </label>
+                      </div>
 
-                        {posCustomSizeError && (
-                          <div className="sm:col-span-2 text-xs text-rose-600">
-                            Bitte Breite und Höhe größer 0 eingeben.
+                      {/* Custom Produktgröße */}
+                      {posForm.formatPreset === "Individuell" && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <label className="grid gap-1">
+                            <span className="text-xs font-medium text-zinc-600">Breite (mm) *</span>
+                            <input
+                              value={posForm.customWidthMm}
+                              onChange={(e) => setPosForm({ ...posForm, customWidthMm: e.target.value })}
+                              onBlur={() => setPosTouched(true)}
+                              className={[
+                                "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
+                                posCustomSizeError ? "border-rose-400" : "border-zinc-200",
+                              ].join(" ")}
+                              placeholder="z.B. 210"
+                            />
+                          </label>
+
+                          <label className="grid gap-1">
+                            <span className="text-xs font-medium text-zinc-600">Höhe (mm) *</span>
+                            <input
+                              value={posForm.customHeightMm}
+                              onChange={(e) => setPosForm({ ...posForm, customHeightMm: e.target.value })}
+                              onBlur={() => setPosTouched(true)}
+                              className={[
+                                "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
+                                posCustomSizeError ? "border-rose-400" : "border-zinc-200",
+                              ].join(" ")}
+                              placeholder="z.B. 297"
+                            />
+                          </label>
+
+                          {posCustomSizeError && (
+                            <div className="sm:col-span-2 text-xs text-rose-600">
+                              Bitte Breite und Höhe größer 0 eingeben.
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Laufrichtung */}
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-zinc-600">Papierlaufrichtung</span>
+                          <select
+                            value={posForm.paperGrain}
+                            onChange={(e) =>
+                              setPosForm({ ...posForm, paperGrain: e.target.value as PaperGrain })
+                            }
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                          >
+                            <option value="SB">Schmalbahn (SB)</option>
+                            <option value="BB">Breitbahn (BB)</option>
+                          </select>
+                        </label>
+
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-zinc-600">Produktlaufrichtung</span>
+                          <select
+                            value={posForm.productOrientation}
+                            onChange={(e) =>
+                              setPosForm({
+                                ...posForm,
+                                productOrientation: e.target.value as ProductOrientation,
+                              })
+                            }
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                          >
+                            <option value="Hochformat">Hochformat</option>
+                            <option value="Querformat">Querformat</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      {/* Nutzen Setup */}
+                      <Card className="p-4 bg-zinc-50/60 border border-zinc-200">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="text-xs text-zinc-500">Nutzenrechner</div>
+                            <div className="text-sm font-semibold text-zinc-900">
+                              Bogen / Beschnitt / Bereich / Zwischenschnitt
+                            </div>
+                          </div>
+                          <div className="text-xs text-zinc-500">Vorschau aktiv</div>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                          <label className="min-w-0 flex flex-col gap-1">
+                            <span className="text-[11px] leading-4 font-medium text-zinc-600">Bogenformat</span>
+                            <select
+                              value={posForm.sheetPreset}
+                              onChange={(e) =>
+                                setPosForm({ ...posForm, sheetPreset: e.target.value as SheetPreset })
+                              }
+                              className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                            >
+                              {SHEET_PRESETS.map((s) => (
+                                <option key={s.key} value={s.key}>
+                                  {s.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <div className="min-w-0 grid gap-3 sm:grid-cols-3">
+                            <label className="min-w-0 flex flex-col gap-1">
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600 whitespace-nowrap">
+                                Beschnitt (mm)
+                              </span>
+                              <input
+                                value={posForm.bleedMm}
+                                onChange={(e) => setPosForm({ ...posForm, bleedMm: e.target.value })}
+                                className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                              />
+                            </label>
+
+                            <label className="min-w-0 flex flex-col gap-1">
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600 whitespace-nowrap">
+                                Nicht druckb. (mm)
+                              </span>
+                              <input
+                                value={posForm.marginMm}
+                                onChange={(e) => setPosForm({ ...posForm, marginMm: e.target.value })}
+                                className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                              />
+                            </label>
+
+                            <label className="min-w-0 flex flex-col gap-1">
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600 whitespace-nowrap">
+                                Zwischenschnitt (mm)
+                              </span>
+                              <input
+                                value={posForm.gapMm}
+                                onChange={(e) => setPosForm({ ...posForm, gapMm: e.target.value })}
+                                className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                              />
+                            </label>
+                          </div>
+                        </div>
+
+                        {posForm.sheetPreset === "Individuell" && (
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            <label className="min-w-0 flex flex-col gap-1">
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600">
+                                Bogen Breite (mm) *
+                              </span>
+                              <input
+                                value={posForm.sheetCustomWmm}
+                                onChange={(e) =>
+                                  setPosForm({ ...posForm, sheetCustomWmm: e.target.value })
+                                }
+                                onBlur={() => setPosTouched(true)}
+                                className={[
+                                  "h-10 w-full rounded-2xl border bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10",
+                                  sheetCustomSizeError ? "border-rose-400" : "border-zinc-200",
+                                ].join(" ")}
+                                placeholder="z.B. 320"
+                              />
+                            </label>
+
+                            <label className="min-w-0 flex flex-col gap-1">
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600">
+                                Bogen Höhe (mm) *
+                              </span>
+                              <input
+                                value={posForm.sheetCustomHmm}
+                                onChange={(e) =>
+                                  setPosForm({ ...posForm, sheetCustomHmm: e.target.value })
+                                }
+                                onBlur={() => setPosTouched(true)}
+                                className={[
+                                  "h-10 w-full rounded-2xl border bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10",
+                                  sheetCustomSizeError ? "border-rose-400" : "border-zinc-200",
+                                ].join(" ")}
+                                placeholder="z.B. 450"
+                              />
+                            </label>
+
+                            {sheetCustomSizeError && (
+                              <div className="sm:col-span-2 text-xs text-rose-600">
+                                Bitte Bogen-Breite und -Höhe größer 0 eingeben.
+                              </div>
+                            )}
                           </div>
                         )}
-                      </div>
-                    )}
 
-                    <div className="grid gap-3 sm:grid-cols-2">
+                        {liveNesting && <NestingPreview layout={liveNesting} />}
+
+                        <div className="mt-3 rounded-2xl border border-zinc-200 bg-white p-4">
+                          {liveNesting ? (
+                            <div className="grid gap-1 text-sm">
+                              <div className="flex items-center justify-between">
+                                <div className="text-zinc-600">Nutzen pro Bogen</div>
+                                <div className="font-semibold text-zinc-900">{liveNesting.nUp}</div>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <div className="text-zinc-600">Raster</div>
+                                <div className="text-zinc-900">
+                                  {liveNesting.gridX} × {liveNesting.gridY}
+                                  {liveNesting.rotated ? " (gedreht)" : ""}
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <div className="text-zinc-600">Abfall (Fläche)</div>
+                                <div className="text-zinc-900">
+                                  {(liveNesting.wasteArea / 100).toFixed(0)} cm²
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-sm text-zinc-500">
+                              Nutzen kann noch nicht berechnet werden (bitte Format/Bogen prüfen).
+                            </div>
+                          )}
+                        </div>
+                      </Card>
+
+                      {/* Papier / Farben / Preis */}
                       <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Papierlaufrichtung</span>
-                        <select
-                          value={posForm.paperGrain}
-                          onChange={(e) =>
-                            setPosForm({ ...posForm, paperGrain: e.target.value as PaperGrain })
-                          }
-                          className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                        >
-                          <option value="SB">Schmalbahn (SB)</option>
-                          <option value="BB">Breitbahn (BB)</option>
-                        </select>
-                      </label>
-
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Produktlaufrichtung</span>
-                        <select
-                          value={posForm.productOrientation}
-                          onChange={(e) =>
-                            setPosForm({
-                              ...posForm,
-                              productOrientation: e.target.value as ProductOrientation,
-                            })
-                          }
-                          className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                        >
-                          <option value="Hochformat">Hochformat</option>
-                          <option value="Querformat">Querformat</option>
-                        </select>
-                      </label>
-                    </div>
-
-                    <label className="grid gap-1">
-                      <span className="text-xs font-medium text-zinc-600">Papier</span>
-                      <input
-                        value={posForm.paper}
-                        onChange={(e) => setPosForm({ ...posForm, paper: e.target.value })}
-                        className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                        placeholder="z.B. 135g Bilderdruck matt"
-                      />
-                    </label>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Farben</span>
-                        <select
-                          value={posForm.colors}
-                          onChange={(e) =>
-                            setPosForm({ ...posForm, colors: e.target.value as ColorOption })
-                          }
-                          className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                        >
-                          {COLOR_OPTIONS.map((opt) => (
-                            <option key={opt} value={opt}>
-                              {opt}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-zinc-600">Einzelpreis (€)</span>
+                        <span className="text-xs font-medium text-zinc-600">Papier</span>
                         <input
-                          value={posForm.unitPrice}
-                          onChange={(e) => setPosForm({ ...posForm, unitPrice: e.target.value })}
+                          value={posForm.paper}
+                          onChange={(e) => setPosForm({ ...posForm, paper: e.target.value })}
                           className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                          placeholder="z.B. 0,12"
                         />
                       </label>
-                    </div>
 
-                    <div className="mt-2 flex items-center justify-end gap-2">
-                      <Button variant="secondary" onClick={() => setIsPosModalOpen(false)}>
-                        Abbrechen
-                      </Button>
-                      <Button onClick={upsertPosition} disabled={!canSavePosition()}>
-                        Speichern
-                      </Button>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-zinc-600">Farben</span>
+                          <select
+                            value={posForm.colors}
+                            onChange={(e) =>
+                              setPosForm({ ...posForm, colors: e.target.value as ColorOption })
+                            }
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                          >
+                            {COLOR_OPTIONS.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-zinc-600">Einzelpreis (€)</span>
+                          <input
+                            value={posForm.unitPrice}
+                            onChange={(e) => setPosForm({ ...posForm, unitPrice: e.target.value })}
+                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="mt-1 flex items-center justify-end gap-2">
+                        <Button variant="secondary" onClick={() => setIsPosModalOpen(false)}>
+                          Abbrechen
+                        </Button>
+                        <Button onClick={upsertPosition} disabled={!canSavePosition()}>
+                          Speichern
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                </Card>
+                  </Card>
+                </div>
               </div>
             </div>
           )}
@@ -889,7 +1507,6 @@ export default function Quotes() {
                           "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
                           quoteEditTitleError ? "border-rose-400" : "border-zinc-200",
                         ].join(" ")}
-                        placeholder="z.B. Flyer A5, 10.000 Stk"
                       />
                       {quoteEditTitleError && (
                         <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>
@@ -950,10 +1567,7 @@ export default function Quotes() {
       {/* ================= Quote Create Modal ================= */}
       {isQuoteCreateModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/30"
-            onClick={() => setIsQuoteCreateModalOpen(false)}
-          />
+          <div className="absolute inset-0 bg-black/30" onClick={() => setIsQuoteCreateModalOpen(false)} />
 
           <div className="relative w-full max-w-lg">
             <Card className="p-6">
@@ -978,7 +1592,6 @@ export default function Quotes() {
                       "h-10 rounded-2xl border bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15",
                       quoteCreateTitleError ? "border-rose-400" : "border-zinc-200",
                     ].join(" ")}
-                    placeholder="z.B. Flyer A5, 10.000 Stk"
                   />
                   {quoteCreateTitleError && (
                     <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>
