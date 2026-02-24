@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
+import { Switch } from "../ui/Switch";
 
 /* ================================
    TYPES
@@ -224,9 +225,32 @@ function sheetDimsFromPreset(preset: SheetPreset, customW?: number, customH?: nu
   return { w, h, text };
 }
 
+function applyOrientation(
+  dims: { w: number; h: number },
+  orientation: ProductOrientation
+) {
+  const w = dims.w;
+  const h = dims.h;
+
+  if (orientation === "Hochformat") {
+    // Hochformat = Höhe ist die lange Seite
+    return h >= w ? { w, h } : { w: h, h: w };
+  }
+
+  // Querformat = Breite ist die lange Seite
+  return w >= h ? { w, h } : { w: h, h: w };
+}
+
 function safeFloor(n: number) {
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.floor(n);
+}
+
+function isRotationAllowed(params: { paperGrain: PaperGrain; productOrientation: ProductOrientation }) {
+  // Aktuell: immer erlauben (Falz-/Faser-Regel folgt später).
+  // Hier können wir später Regeln einbauen (z.B. Falz: Faser parallel zur Falz).
+  void params;
+  return true;
 }
 
 function computeNesting(params: {
@@ -237,7 +261,10 @@ function computeNesting(params: {
   bleed: number;
   margin: number;
   gap: number;
+  allowRotation?: boolean;
 }): NestingLayout | null {
+  const allowRotation = params.allowRotation ?? true;
+
   const sheetW = params.sheetW;
   const sheetH = params.sheetH;
 
@@ -282,244 +309,250 @@ function computeNesting(params: {
   }
 
   const c1 = candidate(productW, productH, false);
-  const c2 = candidate(productH, productW, true);
+  const c2 = allowRotation ? candidate(productH, productW, true) : null;
 
+  // Rotation bevorzugen bei Gleichstand (wie du es wolltest)
   const best =
-    c2.nUp > c1.nUp
+    !c2
+      ? c1
+      : c2.nUp > c1.nUp
       ? c2
       : c2.nUp < c1.nUp
       ? c1
-      : c2.wasteArea < c1.wasteArea
+      : c2.wasteArea <= c1.wasteArea
       ? c2
       : c1;
 
   return best.nUp > 0 ? best : null;
 }
 
+
+/* ================================
+   GRAPHIC PREVIEW (Option B)
+================================ */
 /* ================================
    GRAPHIC PREVIEW (Option B)
 ================================ */
 
-function NestingPreview(props: { layout: NestingLayout }) {
-  const { layout } = props;
+function NestingPreview(props: { layout: NestingLayout; paperGrain?: PaperGrain }) {
+  const { layout, paperGrain } = props;
 
-  // Anzeige immer Querformat: wir "drehen" nur die Darstellung, nicht die Logik.
-  const landscape = layout.sheetW >= layout.sheetH;
+  // RAW sheet dims (mm units from computeNesting)
+  const rawW = layout.sheetW;
+  const rawH = layout.sheetH;
 
-  // Display-Maße (nur Rendering)
-  const dispSheetW = landscape ? layout.sheetW : layout.sheetH;
-  const dispSheetH = landscape ? layout.sheetH : layout.sheetW;
+  // Always display landscape: rotate only the drawing if portrait
+  const isPortrait = rawH > rawW;
+  const viewW = isPortrait ? rawH : rawW;
+  const viewH = isPortrait ? rawW : rawH;
 
-  // Margin / Gap
-  const margin = layout.margin;
-  const gap = layout.gap;
+  const margin = layout.margin ?? 0;
+  const gap = layout.gap ?? 0;
 
-  // Display-Produktmaße: wenn wir den Sheet gedreht anzeigen, müssen wir für die Darstellung umdenken
-  const dispProdW = landscape ? layout.productW : layout.productH;
-  const dispProdH = landscape ? layout.productH : layout.productW;
+  const printableW = Math.max(0, rawW - 2 * margin);
+  const printableH = Math.max(0, rawH - 2 * margin);
 
-  const dispGridX = landscape ? layout.gridX : layout.gridY;
-  const dispGridY = landscape ? layout.gridY : layout.gridX;
+  // IMPORTANT: layout already represents the BEST variant.
+  // If rotated was best, productW/productH + gridX/gridY already reflect that.
+  const prodW = layout.productW;
+  const prodH = layout.productH;
 
-  const vw = 720;
-  const vh = 320;
-  const pad = 14;
+  const gridX = Math.max(0, layout.gridX);
+  const gridY = Math.max(0, layout.gridY);
 
-  const scale = Math.min((vw - pad * 2) / dispSheetW, (vh - pad * 2) / dispSheetH);
+  // Used area (includes gaps)
+  const usedW = gridX > 0 ? gridX * prodW + (gridX - 1) * gap : 0;
+  const usedH = gridY > 0 ? gridY * prodH + (gridY - 1) * gap : 0;
 
-  const sheetW = dispSheetW * scale;
-  const sheetH = dispSheetH * scale;
+  // Center grid in printable area
+  const startX = margin + Math.max(0, (printableW - usedW) / 2);
+  const startY = margin + Math.max(0, (printableH - usedH) / 2);
 
-  const m = margin * scale;
-  const g = gap * scale;
-
-  const availW = (dispSheetW - 2 * margin) * scale;
-  const availH = (dispSheetH - 2 * margin) * scale;
-
-  const prodW = dispProdW * scale;
-  const prodH = dispProdH * scale;
-
-  const sx = pad;
-  const sy = pad;
-
-  // Zentrierung: Nutzenpaket innerhalb der Nutzfläche mittig ausrichten
-  const usedW = dispGridX > 0 ? dispGridX * prodW + (dispGridX - 1) * g : 0;
-  const usedH = dispGridY > 0 ? dispGridY * prodH + (dispGridY - 1) * g : 0;
-
-  const availX = sx + m;
-  const availY = sy + m;
-
-  const offsetX = Math.max(0, (availW - usedW) / 2);
-  const offsetY = Math.max(0, (availH - usedH) / 2);
-
-  const x0 = availX + offsetX;
-  const y0 = availY + offsetY;
-
-  // Nutzen-Rechtecke
-  const products: Array<{ x: number; y: number; w: number; h: number }> = [];
-  for (let yy = 0; yy < dispGridY; yy++) {
-    for (let xx = 0; xx < dispGridX; xx++) {
-      const px = x0 + xx * (prodW + g);
-      const py = y0 + yy * (prodH + g);
-      products.push({ x: px, y: py, w: prodW, h: prodH });
+  // Build rects
+  const rects: Array<{ x: number; y: number; w: number; h: number; key: string }> = [];
+  for (let y = 0; y < gridY; y++) {
+    for (let x = 0; x < gridX; x++) {
+      rects.push({
+        x: startX + x * (prodW + gap),
+        y: startY + y * (prodH + gap),
+        w: prodW,
+        h: prodH,
+        key: `${x}-${y}`,
+      });
     }
   }
 
-  // Zwischenschnitt-Linien (rot, sehr dünn) - innerhalb des Nutzenpakets
-  const cutLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+  // Used bounds (for crop marks)
+  const usedX0 = startX;
+  const usedY0 = startY;
+  const usedX1 = startX + usedW;
+  const usedY1 = startY + usedH;
 
-  for (let i = 1; i < dispGridX; i++) {
-    const xLine = x0 + (i - 1) * (prodW + g) + prodW + g / 2;
-    cutLines.push({ x1: xLine, y1: y0, x2: xLine, y2: y0 + usedH });
+  // Zwischenschnitt lines (mid-gap)
+  const cutLines: Array<{ x1: number; y1: number; x2: number; y2: number; key: string }> = [];
+
+  if (gap > 0 && gridX > 1) {
+    for (let i = 1; i < gridX; i++) {
+      const x = startX + i * prodW + (i - 0.5) * gap;
+      cutLines.push({ x1: x, y1: usedY0, x2: x, y2: usedY1, key: `v-${i}` });
+    }
   }
 
-  for (let j = 1; j < dispGridY; j++) {
-    const yLine = y0 + (j - 1) * (prodH + g) + prodH + g / 2;
-    cutLines.push({ x1: x0, y1: yLine, x2: x0 + usedW, y2: yLine });
+  if (gap > 0 && gridY > 1) {
+    for (let i = 1; i < gridY; i++) {
+      const y = startY + i * prodH + (i - 0.5) * gap;
+      cutLines.push({ x1: usedX0, y1: y, x2: usedX1, y2: y, key: `h-${i}` });
+    }
   }
 
-  // Schnittmarken (dünn, dezent) – kleine "Ticks" an den Ecken der Nutzfläche
-  const markLen = 10;
-  const marks = [
-    { x1: availX, y1: availY, x2: availX + markLen, y2: availY },
-    { x1: availX, y1: availY, x2: availX, y2: availY + markLen },
+  const cropLen = Math.min(12, Math.max(6, Math.min(rawW, rawH) * 0.03));
+  const cropStroke = 0.35;
+  const cutStroke = 0.35;
 
-    { x1: availX + availW, y1: availY, x2: availX + availW - markLen, y2: availY },
-    { x1: availX + availW, y1: availY, x2: availX + availW, y2: availY + markLen },
+  // Rotate entire content if portrait (RAW -> VIEW)
+  const groupTransform = isPortrait ? `translate(${viewW} 0) rotate(90)` : undefined;
 
-    { x1: availX, y1: availY + availH, x2: availX + markLen, y2: availY + availH },
-    { x1: availX, y1: availY + availH, x2: availX, y2: availY + availH - markLen },
+  // ===== Paper grain arrow (VIEW coords) =====
+  // SB: left->right, BB: bottom->top
+  const arrow = (() => {
+    if (!paperGrain) return null;
 
-    { x1: availX + availW, y1: availY + availH, x2: availX + availW - markLen, y2: availY + availH },
-    { x1: availX + availW, y1: availY + availH, x2: availX + availW, y2: availY + availH - markLen },
-  ];
+    const arrowLen = Math.min(55, Math.max(35, viewW * 0.12));
+    const ax = Math.max(8, viewW * 0.03);
+    const ay = viewH - Math.max(10, viewH * 0.05);
 
-  // Minimal-Radius
-  const rSheet = 3;
-  const rAvail = 2;
-  const rProd = 2;
+    const stroke = 0.9;
+    const color = "#334155";
+    const head = 4.2;
+
+    if (paperGrain === "SB") {
+      const x1 = ax;
+      const y1 = ay;
+      const x2 = ax + arrowLen;
+      const y2 = ay;
+
+      const p1 = `${x2},${y2}`;
+      const p2 = `${x2 - head},${y2 - head * 0.9}`;
+      const p3 = `${x2 - head},${y2 + head * 0.9}`;
+
+      return (
+        <>
+          <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={stroke} />
+          <polygon points={`${p1} ${p2} ${p3}`} fill={color} />
+          <text x={x1} y={y1 - 4.5} fontSize={8.5} fill={color}>
+            SB
+          </text>
+        </>
+      );
+    }
+
+    // BB
+    const x1 = ax;
+    const y1 = ay;
+    const x2 = ax;
+    const y2 = ay - arrowLen;
+
+    const p1 = `${x2},${y2}`;
+    const p2 = `${x2 - head * 0.9},${y2 + head}`;
+    const p3 = `${x2 + head * 0.9},${y2 + head}`;
+
+    return (
+      <>
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={stroke} />
+        <polygon points={`${p1} ${p2} ${p3}`} fill={color} />
+        <text x={x1 + 6} y={y1 - 2} fontSize={8.5} fill={color}>
+          BB
+        </text>
+      </>
+    );
+  })();
 
   return (
-    <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200 bg-white">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-4 py-2">
-        <div className="text-xs text-zinc-600">Vorschau (schematisch)</div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
-            {layout.nUp} Nutzen/Bogen
+    <div className="relative">
+      {/* Badges */}
+      <div className="pointer-events-none absolute right-3 top-3 z-10 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-700">
+          {layout.nUp} Nutzen/Bogen
+        </span>
+        <span className="inline-flex items-center rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-700">
+          {layout.gridX}×{layout.gridY}
+        </span>
+        {layout.rotated && (
+          <span className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700">
+            gedreht
           </span>
-          <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-700">
-            {layout.gridX}×{layout.gridY}
-          </span>
-          {layout.rotated && (
-            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-              gedreht
-            </span>
-          )}
-        </div>
+        )}
       </div>
 
-      <div className="p-3">
-        <svg viewBox={`0 0 ${vw} ${vh}`} width="100%" height="auto" className="block">
-          {/* Bogen */}
-          <rect
-            x={sx}
-            y={sy}
-            width={sheetW}
-            height={sheetH}
-            rx={rSheet}
-            fill="rgb(250 250 250)"
-            stroke="rgb(228 228 231)"
-            strokeWidth="2"
-          />
+      {/* Preview container */}
+      <div className="flex h-[440px] w-full items-center justify-center overflow-hidden rounded-md border border-zinc-200 bg-white p-4">
+        <svg viewBox={`0 0 ${viewW} ${viewH}`} className="block max-h-full max-w-full" preserveAspectRatio="xMidYMid meet">
+          {/* Arrow ALWAYS bottom-left (VIEW coords) */}
+          {arrow}
 
-          {/* Nicht druckbarer Bereich (rosa Zone) */}
-          <rect
-            x={sx}
-            y={sy}
-            width={sheetW}
-            height={sheetH}
-            rx={rSheet}
-            fill="rgb(253 232 248)"
-            opacity="0.9"
-          />
+          {/* Content is RAW; rotate into VIEW if needed */}
+          <g transform={groupTransform}>
+            {/* Outer sheet */}
+            <rect x={0} y={0} width={rawW} height={rawH} fill="#ffffff" stroke="#0f172a" strokeWidth={0.6} />
 
-          {/* Nutzfläche (innen) */}
-          <rect
-            x={availX}
-            y={availY}
-            width={availW}
-            height={availH}
-            rx={rAvail}
-            fill="white"
-            stroke="rgb(226 232 240)"
-            strokeWidth="1.2"
-          />
+            {/* Non-printable area (pink) */}
+            <rect x={0} y={0} width={rawW} height={rawH} fill="#ffd6e7" opacity={0.55} />
+            {/* Printable area */}
+            <rect x={margin} y={margin} width={printableW} height={printableH} fill="#ffffff" />
+            <rect x={margin} y={margin} width={printableW} height={printableH} fill="none" stroke="#e4e4e7" strokeWidth={0.6} />
 
-          {/* Schnittmarken (dünn) */}
-          {marks.map((m, i) => (
-            <line
-              key={i}
-              x1={m.x1}
-              y1={m.y1}
-              x2={m.x2}
-              y2={m.y2}
-              stroke="rgb(100 116 139)"
-              strokeWidth="0.8"
-              opacity="0.55"
-              shapeRendering="crispEdges"
-            />
-          ))}
+            {/* Zwischenschnitt (red thin) */}
+            {cutLines.map((l) => (
+              <line
+                key={l.key}
+                x1={l.x1}
+                y1={l.y1}
+                x2={l.x2}
+                y2={l.y2}
+                stroke="#ff2d2d"
+                strokeWidth={cutStroke}
+                opacity={0.9}
+                shapeRendering="crispEdges"
+              />
+            ))}
 
-          {/* Zwischenschnitt-Linien (rot, sehr dünn) */}
-          {cutLines.map((l, i) => (
-            <line
-              key={i}
-              x1={l.x1}
-              y1={l.y1}
-              x2={l.x2}
-              y2={l.y2}
-              stroke="rgb(239 68 68)"
-              strokeWidth="0.7"
-              opacity="0.75"
-              shapeRendering="crispEdges"
-            />
-          ))}
+            {/* Nutzen (baby blue) */}
+            {rects.map((r) => (
+              <rect
+                key={r.key}
+                x={r.x}
+                y={r.y}
+                width={r.w}
+                height={r.h}
+                fill="#cfe9ff"
+                stroke="#0f172a"
+                strokeWidth={0.4}
+                shapeRendering="crispEdges"
+              />
+            ))}
 
-          {/* Nutzen (babyblau) */}
-          {products.map((p, i) => (
-            <rect
-              key={i}
-              x={p.x}
-              y={p.y}
-              width={p.w}
-              height={p.h}
-              rx={rProd}
-              fill="rgb(219 234 254)"
-              stroke="rgb(147 197 253)"
-              strokeWidth="1"
-            />
-          ))}
+            {/* Crop marks (thin) */}
+            {layout.nUp > 0 && (
+              <>
+                {/* top-left */}
+                <line x1={usedX0} y1={usedY0 - cropLen} x2={usedX0} y2={usedY0} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+                <line x1={usedX0 - cropLen} y1={usedY0} x2={usedX0} y2={usedY0} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+
+                {/* top-right */}
+                <line x1={usedX1} y1={usedY0 - cropLen} x2={usedX1} y2={usedY0} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+                <line x1={usedX1} y1={usedY0} x2={usedX1 + cropLen} y2={usedY0} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+
+                {/* bottom-left */}
+                <line x1={usedX0} y1={usedY1} x2={usedX0} y2={usedY1 + cropLen} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+                <line x1={usedX0 - cropLen} y1={usedY1} x2={usedX0} y2={usedY1} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+
+                {/* bottom-right */}
+                <line x1={usedX1} y1={usedY1} x2={usedX1} y2={usedY1 + cropLen} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+                <line x1={usedX1} y1={usedY1} x2={usedX1 + cropLen} y2={usedY1} stroke="#0f172a" strokeWidth={cropStroke} opacity={0.8} shapeRendering="crispEdges" />
+              </>
+            )}
+          </g>
         </svg>
-
-        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
-          <span className="inline-flex items-center gap-2">
-            <span className="h-3 w-3 border border-zinc-300 bg-white" />
-            Nutzfläche
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="h-3 w-3 bg-pink-100" />
-            Nicht druckbar
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="h-3 w-3 border border-blue-300 bg-blue-100" />
-            Nutzen
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="h-[2px] w-6 bg-red-500" />
-            Zwischenschnitt
-          </span>
-        </div>
       </div>
     </div>
   );
@@ -555,27 +588,28 @@ export default function Quotes() {
   const [posTouched, setPosTouched] = useState(false);
   const [editingPosId, setEditingPosId] = useState<string | null>(null);
 
-  const [posForm, setPosForm] = useState({
-    productName: "",
-    formatPreset: "SRA3" as FormatPreset,
-    customWidthMm: "",
-    customHeightMm: "",
-    paperGrain: "SB" as PaperGrain,
-    productOrientation: "Hochformat" as ProductOrientation,
+const [posForm, setPosForm] = useState({
+  productName: "",
+  formatPreset: "SRA3" as FormatPreset,
+  customWidthMm: "",
+  customHeightMm: "",
+  paperGrain: "SB" as PaperGrain,
+  productOrientation: "Hochformat" as ProductOrientation,
 
-    sheetPreset: "SRA3" as SheetPreset,
-    sheetCustomWmm: "",
-    sheetCustomHmm: "",
-    bleedMm: "3",
-    marginMm: "5",
-    gapMm: "3",
+  allowAutoRotate: true, // ✅ NEU
 
-    quantity: "1000",
-    paper: "135g Bilderdruck matt",
-    colors: "4/4 (CMYK beidseitig)" as ColorOption,
-    unitPrice: "0,00",
-  });
+  sheetPreset: "SRA3" as SheetPreset,
+  sheetCustomWmm: "",
+  sheetCustomHmm: "",
+  bleedMm: "3",
+  marginMm: "5",
+  gapMm: "3",
 
+  quantity: "1000",
+  paper: "135g Bilderdruck matt",
+  colors: "4/4 (CMYK beidseitig)" as ColorOption,
+  unitPrice: "0,00",
+});
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return quotes;
@@ -678,28 +712,31 @@ export default function Quotes() {
      POSITION: CREATE / EDIT
   ======================= */
 
-  function resetPosFormDefaults() {
-    setPosForm({
-      productName: "",
-      formatPreset: "SRA3",
-      customWidthMm: "",
-      customHeightMm: "",
-      paperGrain: "SB",
-      productOrientation: "Hochformat",
+function resetPosFormDefaults() {
+  setPosForm({
+    productName: "",
+    formatPreset: "SRA3" as FormatPreset,
+    customWidthMm: "",
+    customHeightMm: "",
+    paperGrain: "SB" as PaperGrain,
+    productOrientation: "Hochformat" as ProductOrientation,
 
-      sheetPreset: "SRA3",
-      sheetCustomWmm: "",
-      sheetCustomHmm: "",
-      bleedMm: "3",
-      marginMm: "5",
-      gapMm: "3",
+    allowAutoRotate: true, // ✅ NEU
 
-      quantity: "1000",
-      paper: "135g Bilderdruck matt",
-      colors: "4/4 (CMYK beidseitig)",
-      unitPrice: "0,00",
-    });
-  }
+    sheetPreset: "SRA3" as SheetPreset,
+    sheetCustomWmm: "",
+    sheetCustomHmm: "",
+    bleedMm: "3",
+    marginMm: "5",
+    gapMm: "3",
+
+    quantity: "1000",
+    paper: "135g Bilderdruck matt",
+    colors: "4/4 (CMYK beidseitig)" as ColorOption,
+    unitPrice: "0,00",
+  });
+}
+
 
   function openAddPosition() {
     if (!selected) return;
@@ -716,26 +753,28 @@ export default function Quotes() {
     const dims = formatDimsFromPreset(p.formatPreset, p.customWidthMm, p.customHeightMm);
     const sheetDims = sheetDimsFromPreset(p.sheetPreset, p.sheetCustomWmm, p.sheetCustomHmm);
 
-    setPosForm({
-      productName: p.productName,
-      formatPreset: p.formatPreset,
-      customWidthMm: p.formatPreset === "Individuell" ? String(dims.w || "") : "",
-      customHeightMm: p.formatPreset === "Individuell" ? String(dims.h || "") : "",
-      paperGrain: p.paperGrain,
-      productOrientation: p.productOrientation,
+  setPosForm({
+  productName: p.productName,
+  formatPreset: p.formatPreset,
+  customWidthMm: p.formatPreset === "Individuell" ? String(dims.w || "") : "",
+  customHeightMm: p.formatPreset === "Individuell" ? String(dims.h || "") : "",
+  paperGrain: p.paperGrain,
+  productOrientation: p.productOrientation,
 
-      sheetPreset: p.sheetPreset,
-      sheetCustomWmm: p.sheetPreset === "Individuell" ? String(sheetDims.w || "") : "",
-      sheetCustomHmm: p.sheetPreset === "Individuell" ? String(sheetDims.h || "") : "",
-      bleedMm: String(p.bleedMm),
-      marginMm: String(p.marginMm),
-      gapMm: String(p.gapMm),
+  allowAutoRotate: true, // ✅ oder später aus p speichern, falls du es persistieren willst
 
-      quantity: String(p.quantity),
-      paper: p.paper,
-      colors: p.colors,
-      unitPrice: String(p.unitPrice).replace(".", ","),
-    });
+  sheetPreset: p.sheetPreset,
+  sheetCustomWmm: p.sheetPreset === "Individuell" ? String(sheetDims.w || "") : "",
+  sheetCustomHmm: p.sheetPreset === "Individuell" ? String(sheetDims.h || "") : "",
+  bleedMm: String(p.bleedMm),
+  marginMm: String(p.marginMm),
+  gapMm: String(p.gapMm),
+
+  quantity: String(p.quantity),
+  paper: p.paper,
+  colors: p.colors,
+  unitPrice: String(p.unitPrice).replace(".", ","),
+});
 
     setPosTouched(false);
     setIsPosModalOpen(true);
@@ -761,10 +800,15 @@ export default function Quotes() {
   }
 
   const liveNesting = useMemo(() => {
-    const prod =
+    const base =
       posForm.formatPreset === "Individuell"
         ? { w: parseNumberDe(posForm.customWidthMm), h: parseNumberDe(posForm.customHeightMm) }
         : formatDimsFromPreset(posForm.formatPreset);
+
+    const prod =
+      posForm.productOrientation === "Querformat"
+        ? { w: base.h, h: base.w }
+        : { w: base.w, h: base.h };
 
     const sheet =
       posForm.sheetPreset === "Individuell"
@@ -777,25 +821,34 @@ export default function Quotes() {
 
     if (!(prod.w > 0 && prod.h > 0 && sheet.w > 0 && sheet.h > 0)) return null;
 
-    return computeNesting({
-      sheetW: sheet.w,
-      sheetH: sheet.h,
-      productTrimW: prod.w,
-      productTrimH: prod.h,
-      bleed,
-      margin,
-      gap,
-    });
+  return computeNesting({
+  sheetW: sheet.w,
+  sheetH: sheet.h,
+  productTrimW: prod.w,
+  productTrimH: prod.h,
+  bleed,
+  margin,
+  gap,
+  allowRotation:
+    posForm.allowAutoRotate &&
+    isRotationAllowed({
+      paperGrain: posForm.paperGrain,
+      productOrientation: posForm.productOrientation,
+    }),
+});
   }, [
     posForm.formatPreset,
     posForm.customWidthMm,
     posForm.customHeightMm,
+    posForm.productOrientation,
     posForm.sheetPreset,
     posForm.sheetCustomWmm,
     posForm.sheetCustomHmm,
     posForm.bleedMm,
     posForm.marginMm,
     posForm.gapMm,
+    posForm.paperGrain,
+    posForm.allowAutoRotate,
   ]);
 
   function upsertPosition() {
@@ -820,15 +873,26 @@ export default function Quotes() {
     const marginMm = Math.max(0, parseNumberDe(posForm.marginMm));
     const gapMm = Math.max(0, parseNumberDe(posForm.gapMm));
 
+    const orientedProd =
+      posForm.productOrientation === "Querformat"
+        ? { w: prodDims.h, h: prodDims.w }
+        : { w: prodDims.w, h: prodDims.h };
+
     const nesting = computeNesting({
-      sheetW: sheetDims.w,
-      sheetH: sheetDims.h,
-      productTrimW: prodDims.w,
-      productTrimH: prodDims.h,
-      bleed: bleedMm,
-      margin: marginMm,
-      gap: gapMm,
-    });
+  sheetW: sheetDims.w,
+  sheetH: sheetDims.h,
+  productTrimW: orientedProd.w,
+  productTrimH: orientedProd.h,
+  bleed: bleedMm,
+  margin: marginMm,
+  gap: gapMm,
+  allowRotation:
+    posForm.allowAutoRotate &&
+    isRotationAllowed({
+      paperGrain: posForm.paperGrain,
+      productOrientation: posForm.productOrientation,
+    }),
+});
 
     const normalized: Omit<QuotePosition, "id"> = {
       productName: posForm.productName.trim(),
@@ -1187,9 +1251,7 @@ export default function Quotes() {
                           <span className="text-xs font-medium text-zinc-600">Produktformat</span>
                           <select
                             value={posForm.formatPreset}
-                            onChange={(e) =>
-                              setPosForm({ ...posForm, formatPreset: e.target.value as FormatPreset })
-                            }
+                            onChange={(e) => setPosForm({ ...posForm, formatPreset: e.target.value as FormatPreset })}
                             className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                           >
                             {FORMAT_PRESETS.map((f) => (
@@ -1251,38 +1313,48 @@ export default function Quotes() {
                       )}
 
                       {/* Laufrichtung */}
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <label className="grid gap-1">
-                          <span className="text-xs font-medium text-zinc-600">Papierlaufrichtung</span>
-                          <select
-                            value={posForm.paperGrain}
-                            onChange={(e) =>
-                              setPosForm({ ...posForm, paperGrain: e.target.value as PaperGrain })
-                            }
-                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                          >
-                            <option value="SB">Schmalbahn (SB)</option>
-                            <option value="BB">Breitbahn (BB)</option>
-                          </select>
-                        </label>
+<div className="grid gap-3 sm:grid-cols-2">
+  <label className="grid gap-1">
+    <span className="text-xs font-medium text-zinc-600">Papierlaufrichtung</span>
+    <select
+      value={posForm.paperGrain}
+      onChange={(e) => setPosForm({ ...posForm, paperGrain: e.target.value as PaperGrain })}
+      className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+    >
+      <option value="SB">Schmalbahn (SB)</option>
+      <option value="BB">Breitbahn (BB)</option>
+    </select>
+  </label>
 
-                        <label className="grid gap-1">
-                          <span className="text-xs font-medium text-zinc-600">Produktlaufrichtung</span>
-                          <select
-                            value={posForm.productOrientation}
-                            onChange={(e) =>
-                              setPosForm({
-                                ...posForm,
-                                productOrientation: e.target.value as ProductOrientation,
-                              })
-                            }
-                            className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
-                          >
-                            <option value="Hochformat">Hochformat</option>
-                            <option value="Querformat">Querformat</option>
-                          </select>
-                        </label>
-                      </div>
+  <label className="grid gap-1">
+    <span className="text-xs font-medium text-zinc-600">Produktlaufrichtung</span>
+    <select
+      value={posForm.productOrientation}
+      onChange={(e) =>
+        setPosForm({
+          ...posForm,
+          productOrientation: e.target.value as ProductOrientation,
+        })
+      }
+      className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
+    >
+      <option value="Hochformat">Hochformat</option>
+      <option value="Querformat">Querformat</option>
+    </select>
+  </label>
+</div>
+
+<Switch
+  checked={posForm.allowAutoRotate}
+  onChange={(next) => setPosForm({ ...posForm, allowAutoRotate: next })}
+  label="Auto-Rotation erlauben"
+  description="Produkt darf im Nutzen um 90° gedreht werden."
+/>
+
+{/* Nutzen Setup */}
+<Card className="p-4 bg-zinc-50/60 border border-zinc-200">
+  ...
+</Card>
 
                       {/* Nutzen Setup */}
                       <Card className="p-4 bg-zinc-50/60 border border-zinc-200">
@@ -1301,9 +1373,7 @@ export default function Quotes() {
                             <span className="text-[11px] leading-4 font-medium text-zinc-600">Bogenformat</span>
                             <select
                               value={posForm.sheetPreset}
-                              onChange={(e) =>
-                                setPosForm({ ...posForm, sheetPreset: e.target.value as SheetPreset })
-                              }
+                              onChange={(e) => setPosForm({ ...posForm, sheetPreset: e.target.value as SheetPreset })}
                               className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
                             >
                               {SHEET_PRESETS.map((s) => (
@@ -1353,14 +1423,10 @@ export default function Quotes() {
                         {posForm.sheetPreset === "Individuell" && (
                           <div className="mt-3 grid gap-3 sm:grid-cols-2">
                             <label className="min-w-0 flex flex-col gap-1">
-                              <span className="text-[11px] leading-4 font-medium text-zinc-600">
-                                Bogen Breite (mm) *
-                              </span>
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600">Bogen Breite (mm) *</span>
                               <input
                                 value={posForm.sheetCustomWmm}
-                                onChange={(e) =>
-                                  setPosForm({ ...posForm, sheetCustomWmm: e.target.value })
-                                }
+                                onChange={(e) => setPosForm({ ...posForm, sheetCustomWmm: e.target.value })}
                                 onBlur={() => setPosTouched(true)}
                                 className={[
                                   "h-10 w-full rounded-2xl border bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10",
@@ -1371,14 +1437,10 @@ export default function Quotes() {
                             </label>
 
                             <label className="min-w-0 flex flex-col gap-1">
-                              <span className="text-[11px] leading-4 font-medium text-zinc-600">
-                                Bogen Höhe (mm) *
-                              </span>
+                              <span className="text-[11px] leading-4 font-medium text-zinc-600">Bogen Höhe (mm) *</span>
                               <input
                                 value={posForm.sheetCustomHmm}
-                                onChange={(e) =>
-                                  setPosForm({ ...posForm, sheetCustomHmm: e.target.value })
-                                }
+                                onChange={(e) => setPosForm({ ...posForm, sheetCustomHmm: e.target.value })}
                                 onBlur={() => setPosTouched(true)}
                                 className={[
                                   "h-10 w-full rounded-2xl border bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10",
@@ -1396,7 +1458,7 @@ export default function Quotes() {
                           </div>
                         )}
 
-                        {liveNesting && <NestingPreview layout={liveNesting} />}
+                        {liveNesting && <NestingPreview layout={liveNesting} paperGrain={posForm.paperGrain} />}
 
                         <div className="mt-3 rounded-2xl border border-zinc-200 bg-white p-4">
                           {liveNesting ? (
@@ -1414,9 +1476,7 @@ export default function Quotes() {
                               </div>
                               <div className="flex items-center justify-between">
                                 <div className="text-zinc-600">Abfall (Fläche)</div>
-                                <div className="text-zinc-900">
-                                  {(liveNesting.wasteArea / 100).toFixed(0)} cm²
-                                </div>
+                                <div className="text-zinc-900">{(liveNesting.wasteArea / 100).toFixed(0)} cm²</div>
                               </div>
                             </div>
                           ) : (
@@ -1442,9 +1502,7 @@ export default function Quotes() {
                           <span className="text-xs font-medium text-zinc-600">Farben</span>
                           <select
                             value={posForm.colors}
-                            onChange={(e) =>
-                              setPosForm({ ...posForm, colors: e.target.value as ColorOption })
-                            }
+                            onChange={(e) => setPosForm({ ...posForm, colors: e.target.value as ColorOption })}
                             className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                           >
                             {COLOR_OPTIONS.map((opt) => (
@@ -1508,9 +1566,7 @@ export default function Quotes() {
                           quoteEditTitleError ? "border-rose-400" : "border-zinc-200",
                         ].join(" ")}
                       />
-                      {quoteEditTitleError && (
-                        <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>
-                      )}
+                      {quoteEditTitleError && <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>}
                     </label>
 
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -1518,9 +1574,7 @@ export default function Quotes() {
                         <span className="text-xs font-medium text-zinc-600">Kunde</span>
                         <select
                           value={quoteEditForm.customerName}
-                          onChange={(e) =>
-                            setQuoteEditForm({ ...quoteEditForm, customerName: e.target.value })
-                          }
+                          onChange={(e) => setQuoteEditForm({ ...quoteEditForm, customerName: e.target.value })}
                           className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                         >
                           {demoCustomers.map((c) => (
@@ -1535,9 +1589,7 @@ export default function Quotes() {
                         <span className="text-xs font-medium text-zinc-600">Status</span>
                         <select
                           value={quoteEditForm.status}
-                          onChange={(e) =>
-                            setQuoteEditForm({ ...quoteEditForm, status: e.target.value as QuoteStatus })
-                          }
+                          onChange={(e) => setQuoteEditForm({ ...quoteEditForm, status: e.target.value as QuoteStatus })}
                           className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                         >
                           <option value="Entwurf">Entwurf</option>
@@ -1593,9 +1645,7 @@ export default function Quotes() {
                       quoteCreateTitleError ? "border-rose-400" : "border-zinc-200",
                     ].join(" ")}
                   />
-                  {quoteCreateTitleError && (
-                    <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>
-                  )}
+                  {quoteCreateTitleError && <span className="text-xs text-rose-600">Bitte Titel eingeben.</span>}
                 </label>
 
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -1603,9 +1653,7 @@ export default function Quotes() {
                     <span className="text-xs font-medium text-zinc-600">Kunde</span>
                     <select
                       value={quoteCreateForm.customerName}
-                      onChange={(e) =>
-                        setQuoteCreateForm({ ...quoteCreateForm, customerName: e.target.value })
-                      }
+                      onChange={(e) => setQuoteCreateForm({ ...quoteCreateForm, customerName: e.target.value })}
                       className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                     >
                       {demoCustomers.map((c) => (
@@ -1620,9 +1668,7 @@ export default function Quotes() {
                     <span className="text-xs font-medium text-zinc-600">Status</span>
                     <select
                       value={quoteCreateForm.status}
-                      onChange={(e) =>
-                        setQuoteCreateForm({ ...quoteCreateForm, status: e.target.value as QuoteStatus })
-                      }
+                      onChange={(e) => setQuoteCreateForm({ ...quoteCreateForm, status: e.target.value as QuoteStatus })}
                       className="h-10 rounded-2xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-4 ring-indigo-500/15"
                     >
                       <option value="Entwurf">Entwurf</option>
