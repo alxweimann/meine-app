@@ -74,6 +74,16 @@ type NestingLayout = {
   wasteArea: number; // mm^2
 };
 
+
+type SheetCalc = {
+  nUp: number;            // Nutzen pro Bogen
+  goodSheets: number;     // benötigte Gutbogen (ohne Rüstbogen, ohne Ausschuss)
+  makeReady: number;      // Rüstbogen
+  spoilagePct: number;    // Ausschuss in %
+  spoilageSheets: number; // Ausschussbogen
+  totalSheets: number;    // Gesamtbogen
+};
+
 type QuotePosition = {
   id: string;
   productName: string;
@@ -94,6 +104,13 @@ type QuotePosition = {
   bleedMm: number; // Beschnitt pro Seite
   marginMm: number; // Nicht druckbarer Bereich (ehem. Rand)
   gapMm: number; // Zwischenschnitt (ehem. Abstand)
+
+  allowAutoRotate?: boolean;
+
+  // Bogenbedarf
+  makeReadySheets?: number; // Rüstbogen
+  spoilagePct?: number; // Ausschuss %
+  sheetCalc?: SheetCalc;
 
   // Ergebnis (für spätere grafische Darstellung)
   nesting?: NestingLayout;
@@ -303,6 +320,26 @@ function computeNesting(params: {
   })();
 
   return best.nUp > 0 ? best : null;
+}
+
+
+function computeSheetCalc(params: {
+  quantity: number;
+  nUp: number;
+  makeReadySheets: number;
+  spoilagePct: number;
+}): SheetCalc {
+  const qty = Math.max(0, Math.floor(params.quantity || 0));
+  const nUp = Math.max(1, Math.floor(params.nUp || 1));
+
+  const makeReady = Math.max(0, Math.floor(params.makeReadySheets || 0));
+  const spoilagePct = Math.max(0, params.spoilagePct || 0);
+
+  const goodSheets = Math.ceil(qty / nUp);
+  const spoilageSheets = Math.ceil(goodSheets * (spoilagePct / 100));
+  const totalSheets = goodSheets + makeReady + spoilageSheets;
+
+  return { nUp, goodSheets, makeReady, spoilagePct, spoilageSheets, totalSheets };
 }
 
 /* ================================
@@ -642,6 +679,9 @@ export default function Quotes() {
     marginMm: "5",
     gapMm: "3",
 
+    makeReadySheets: "10",
+    spoilagePct: "2",
+
     quantity: "1000",
     paper: "135g Bilderdruck matt",
     colors: "4/4 (CMYK beidseitig)" as ColorOption,
@@ -807,6 +847,9 @@ export default function Quotes() {
       marginMm: String(p.marginMm),
       gapMm: String(p.gapMm),
 
+      makeReadySheets: String(p.makeReadySheets ?? p.sheetCalc?.makeReady ?? 10),
+      spoilagePct: String(p.spoilagePct ?? p.sheetCalc?.spoilagePct ?? 2),
+
       quantity: String(p.quantity),
       paper: p.paper,
       colors: p.colors,
@@ -895,6 +938,26 @@ const prod =
     posForm.allowAutoRotate,
   ]);
 
+  const liveSheets = useMemo(() => {
+    if (!liveNesting) return null;
+
+    const qty = Math.max(0, parseIntDe(posForm.quantity));
+    const nUp = liveNesting.nUp;
+
+    if (!(nUp > 0) || !(qty >= 0)) return null;
+
+    const goodSheets = Math.ceil(qty / nUp);
+
+    const makeReady = Math.max(0, parseIntDe(posForm.makeReadySheets));
+    const spoilagePct = Math.max(0, parseNumberDe(posForm.spoilagePct));
+
+    const spoilageSheets = spoilagePct > 0 ? Math.ceil((goodSheets + makeReady) * (spoilagePct / 100)) : 0;
+    const totalSheets = goodSheets + makeReady + spoilageSheets;
+
+    return { goodSheets, makeReady, spoilagePct, spoilageSheets, totalSheets };
+  }, [liveNesting, posForm.quantity, posForm.makeReadySheets, posForm.spoilagePct]);
+
+
   function upsertPosition() {
     setPosTouched(true);
     if (!selected) return;
@@ -945,6 +1008,18 @@ const orientedProd =
         }),
     });
 
+    const makeReadySheets = parseIntDe(posForm.makeReadySheets);
+    const spoilagePct = parseNumberDe(posForm.spoilagePct);
+
+    const sheetCalc = nesting
+      ? computeSheetCalc({
+          quantity: qty,
+          nUp: nesting.nUp,
+          makeReadySheets,
+          spoilagePct,
+        })
+      : undefined;
+
     const normalized: Omit<QuotePosition, "id"> = {
       productName: posForm.productName.trim(),
 
@@ -954,6 +1029,11 @@ const orientedProd =
 
       paperGrain: posForm.paperGrain,
       productOrientation: posForm.productOrientation,
+
+      allowAutoRotate: posForm.allowAutoRotate,
+      makeReadySheets,
+      spoilagePct,
+      sheetCalc,
 
       sheetPreset: posForm.sheetPreset,
       sheetCustomWmm: posForm.sheetPreset === "Individuell" ? sheetDims.w : undefined,
@@ -1175,6 +1255,7 @@ const orientedProd =
                       <th className="px-4 py-3 text-left font-medium">Produkt</th>
                       <th className="px-4 py-3 text-left font-medium">Format</th>
                       <th className="px-4 py-3 text-left font-medium">Nutzen</th>
+                      <th className="px-4 py-3 text-left font-medium">Bogen</th>
                       <th className="px-4 py-3 text-left font-medium">Laufrichtung</th>
                       <th className="px-4 py-3 text-left font-medium">Papier</th>
                       <th className="px-4 py-3 text-left font-medium">Farben</th>
@@ -1208,6 +1289,16 @@ const orientedProd =
                                   ({n.gridX}×{n.gridY}
                                   {n.rotated ? " · gedreht" : ""})
                                 </span>
+                              </span>
+                            ) : (
+                              <span className="text-zinc-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-700">
+                            {p.sheetCalc ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="font-medium text-zinc-900">{p.sheetCalc.totalSheets}</span>
+                                <span className="text-zinc-500">Bogen</span>
                               </span>
                             ) : (
                               <span className="text-zinc-400">—</span>
@@ -1467,6 +1558,32 @@ const orientedProd =
                           </div>
                         </div>
 
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <label className="min-w-0 flex flex-col gap-1">
+                            <span className="text-[11px] leading-4 font-medium text-zinc-600 whitespace-nowrap">
+                              Rüstbogen (Stk)
+                            </span>
+                            <input
+                              value={posForm.makeReadySheets}
+                              onChange={(e) => setPosForm({ ...posForm, makeReadySheets: e.target.value })}
+                              className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                              placeholder="z.B. 50"
+                            />
+                          </label>
+
+                          <label className="min-w-0 flex flex-col gap-1">
+                            <span className="text-[11px] leading-4 font-medium text-zinc-600 whitespace-nowrap">
+                              Makulatur (%)
+                            </span>
+                            <input
+                              value={posForm.spoilagePct}
+                              onChange={(e) => setPosForm({ ...posForm, spoilagePct: e.target.value })}
+                              className="h-10 w-full rounded-2xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/10"
+                              placeholder="z.B. 3"
+                            />
+                          </label>
+                        </div>
+
                         {posForm.sheetPreset === "Individuell" && (
                           <div className="mt-3 grid gap-3 sm:grid-cols-2">
                             <label className="min-w-0 flex flex-col gap-1">
@@ -1525,6 +1642,31 @@ const orientedProd =
                                 <div className="text-zinc-600">Abfall (Fläche)</div>
                                 <div className="text-zinc-900">{(liveNesting.wasteArea / 100).toFixed(0)} cm²</div>
                               </div>
+
+                              {liveSheets && (
+                                <>
+                                  <div className="mt-2 h-px w-full bg-zinc-200" />
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-zinc-600">Gute Bogen</div>
+                                    <div className="font-semibold text-zinc-900">{liveSheets.goodSheets.toLocaleString("de-DE")}</div>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-zinc-600">Rüstbogen</div>
+                                    <div className="text-zinc-900">{liveSheets.makeReady.toLocaleString("de-DE")}</div>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-zinc-600">Makulatur</div>
+                                    <div className="text-zinc-900">
+                                      {liveSheets.spoilageSheets.toLocaleString("de-DE")}{" "}
+                                      <span className="text-zinc-400">({liveSheets.spoilagePct || 0}%)</span>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-zinc-600">Bogenbedarf gesamt</div>
+                                    <div className="font-semibold text-zinc-900">{liveSheets.totalSheets.toLocaleString("de-DE")}</div>
+                                  </div>
+                                </>
+                              )}
                             </div>
                           ) : (
                             <div className="text-sm text-zinc-500">
